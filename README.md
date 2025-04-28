@@ -1,5 +1,5 @@
 # Domac(DMC) Programming Language
-## Domac Language Specification
+## Language Specification
 
 1. Motivation
 
