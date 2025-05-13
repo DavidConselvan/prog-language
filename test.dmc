@@ -1,0 +1,15 @@
+var x = 0
+var name = input
+
+print("Welcome, " + name)
+
+while x < 5 {
+    print(x)
+    wait(1000)
+    x = x + 1
+}
+
+if x == 5 {
+    save("log.txt", "Loop finished.")
+    print("Program completed.")
+} 
