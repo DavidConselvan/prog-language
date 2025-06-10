@@ -8,6 +8,9 @@ void yyerror(char *);
 int yylex(void);
 extern int line_num;
 extern char* yytext;
+extern FILE *yyin;
+
+
 
 // Function to print AST
 void print_ast(void *node, int level);
@@ -27,11 +30,14 @@ void print_ast(void *node, int level);
 %token EQ NE LE GE LT GT ASSIGN PLUS MINUS MULT DIV
 %token LBRACE RBRACE LPAREN RPAREN COMMA NEWLINE
 
+%nonassoc LOWER_THAN_ELSE
+%nonassoc ELSE
+
 %type <node> program statements statement
 %type <node> variable_declaration assignment print_statement input_statement
 %type <node> if_statement while_statement wait_statement save_statement
 %type <node> block expression comparison addition term factor
-%type <node> else_if_list else_clause
+%type <node> else_clause_opt
 
 %%
 
@@ -42,15 +48,33 @@ program: statements {
 }
     ;
 
-statements: statement { $$ = $1; }
-         | statements statement { 
-             // Create a list node
-             void** node = malloc(2 * sizeof(void*));
-             node[0] = $1;
-             node[1] = $2;
-             $$ = node;
-         }
-    ;
+statements
+    : statement {
+        if ($1 != NULL) {
+            printf("Statement node type: %s\n", (char*)((void**)($1))[0]);
+            $$ = $1;
+        } else {
+            $$ = NULL;
+        }
+    }
+    | statements statement {
+    if ($2 == NULL) {
+        $$ = $1;
+    } else if ($1 == NULL) {
+        printf("Statement node type: %s\n", (char*)((void**)($2))[0]);
+        $$ = $2;
+    } else {
+        void** node = malloc(4 * sizeof(void*));  // not 3 → add space for NULL
+        node[0] = strdup("statements");
+        node[1] = $1;
+        node[2] = $2;
+        node[3] = NULL;  // <== THIS FIXES THE SEGFAULT
+        printf("Statements node type: %s\n", (char*)((void**)($2))[0]);
+        $$ = node;
+    }
+}
+
+;
 
 statement: variable_declaration { $$ = $1; }
         | assignment { $$ = $1; }
@@ -99,33 +123,39 @@ input_statement: IDENTIFIER ASSIGN INPUT NEWLINE {
     node[2] = NULL;
     $$ = node;
 }
-    ;
-
-if_statement: IF expression block else_if_list else_clause {
-    void** node = malloc(6 * sizeof(void*));
-    node[0] = strdup("if");
-    node[1] = $2;
-    node[2] = $3;
-    node[3] = $4;
-    node[4] = $5;
-    node[5] = NULL;
+    | IDENTIFIER ASSIGN INPUT LPAREN RPAREN NEWLINE {
+    void** node = malloc(3 * sizeof(void*));
+    node[0] = strdup("input");
+    node[1] = strdup($1);
+    node[2] = NULL;
     $$ = node;
 }
     ;
 
-else_if_list: /* empty */ { $$ = NULL; }
-           | else_if_list ELSE IF expression block {
-               void** node = malloc(3 * sizeof(void*));
-               node[0] = $4;
-               node[1] = $5;
-               node[2] = $1;
-               $$ = node;
-           }
+if_statement
+    : IF expression block else_clause_opt {
+        void** node = malloc(6 * sizeof(void*));
+        node[0] = strdup("if");
+        node[1] = $2;    // condition
+        node[2] = $3;    // then block
+        node[3] = NULL;  // no else-if list
+        node[4] = $4;    // else clause opt
+        node[5] = NULL;  // terminator for print_ast loop
+        $$ = node;
+    }
+    ;
+else_clause_opt
+    : /* empty */ { $$ = NULL; }
+    | ELSE if_statement { $$ = $2; }
+    | ELSE block {
+        void** node = malloc(3 * sizeof(void*));  // not 2
+        node[0] = strdup("else");
+        node[1] = $2;
+        node[2] = NULL;  // <== THIS LINE FIXES THE SEGFAULT
+        $$ = node;
+    }
     ;
 
-else_clause: /* empty */ { $$ = NULL; }
-          | ELSE block { $$ = $2; }
-    ;
 
 while_statement: WHILE expression block {
     void** node = malloc(4 * sizeof(void*));
@@ -281,6 +311,12 @@ factor: NUMBER {
         node[1] = NULL;
         $$ = node;
     }
+     | INPUT LPAREN RPAREN {
+        void** node = malloc(2 * sizeof(void*));
+        node[0] = strdup("input");
+        node[1] = NULL;
+        $$ = node;
+    }
      | TIME LPAREN RPAREN {
         void** node = malloc(2 * sizeof(void*));
         node[0] = strdup("time");
@@ -301,6 +337,7 @@ void print_ast(void *node, int level) {
     // Print indentation
     for (int i = 0; i < level; i++) printf("  ");
     
+    // Handle special nodes first
     if (strcmp(type, "number") == 0) {
         printf("Number: %d\n", *(int*)n[1]);
     }
@@ -328,25 +365,35 @@ void print_ast(void *node, int level) {
     }
     else if (strcmp(type, "while") == 0) {
         printf("While Loop:\n");
-        printf("  Condition:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("Condition:\n");
         print_ast(n[1], level + 2);
-        printf("  Body:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("Body:\n");
         print_ast(n[2], level + 2);
     }
     else if (strcmp(type, "if") == 0) {
         printf("If Statement:\n");
-        printf("  Condition:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("Condition:\n");
         print_ast(n[1], level + 2);
-        printf("  Then:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("Then:\n");
         print_ast(n[2], level + 2);
         if (n[3] != NULL) {
-            printf("  Else If:\n");
+            for (int i = 0; i < level + 1; i++) printf("  ");
+            printf("Else If:\n");
             print_ast(n[3], level + 2);
         }
         if (n[4] != NULL) {
-            printf("  Else:\n");
+            for (int i = 0; i < level + 1; i++) printf("  ");
+            printf("Else:\n");
             print_ast(n[4], level + 2);
         }
+    }
+    else if (strcmp(type, "else") == 0) {
+        printf("Else Clause:\n");
+        print_ast(n[1], level + 1);
     }
     else if (strcmp(type, "input") == 0) {
         printf("Input Operation\n");
@@ -357,19 +404,28 @@ void print_ast(void *node, int level) {
     }
     else if (strcmp(type, "save") == 0) {
         printf("Save Statement:\n");
-        printf("  File:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("File:\n");
         print_ast(n[1], level + 2);
-        printf("  Content:\n");
+        for (int i = 0; i < level + 1; i++) printf("  ");
+        printf("Content:\n");
         print_ast(n[2], level + 2);
     }
+    else if (strcmp(type, "statements") == 0) {
+        printf("Statements:\n");
+        // Print statements as a list: left then right
+        print_ast(n[1], level + 1);
+        print_ast(n[2], level + 1);
+    }
     else {
+        // Generic operator node (add, sub, mul, div, eq, lt, etc.)
         printf("%s\n", type);
-        // Print children
         for (int i = 1; n[i] != NULL; i++) {
             print_ast(n[i], level + 1);
         }
     }
 }
+
 
 void yyerror(char *s) {
     fprintf(stderr, "Line %d: Syntax error: %s\n", line_num, s);
@@ -377,7 +433,23 @@ void yyerror(char *s) {
     fprintf(stderr, "Current line: %d\n", line_num);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        yyin = fopen(argv[1], "r");
+        if (!yyin) {
+            fprintf(stderr, "Could not open input file: %s\n", argv[1]);
+            return 1;
+        } else {
+            fprintf(stderr, "Opened input file: %s\n", argv[1]);
+        }
+    } else {
+        yyin = stdin;
+    }
+
+    printf("Starting parse...\n");
     yyparse();
+    printf("Parse completed.\n");
+
     return 0;
-} 
+}
+
