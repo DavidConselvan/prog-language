@@ -1,0 +1,36 @@
+# Exemplo de programa DMC: Relógio com log automático
+
+# Lê nome do usuário
+var name = input()
+
+# Saúda o usuário
+print("Olá, " + name + "! O programa vai contar 5 segundos com timestamps.")
+
+# Inicializa variável de controle
+var counter = 0
+
+# Loop de 5 iterações
+while counter < 5 {
+    # Obtém tempo atual
+    var currentTime = time()
+
+    # Imprime contador e timestamp
+    print("Contador: " + counter + ", Hora atual: " + currentTime)
+
+    # Espera 1 segundo
+    wait(1000)
+
+    # Incrementa contador
+    counter = counter + 1
+}
+
+# Condicional após o loop
+if counter == 5 {
+    print("Loop finalizado. Salvando log em 'log.txt'.")
+    save("log.txt", "O loop de 5 segundos foi completado por " + name)
+} else {
+    print("Algo inesperado ocorreu.")
+}
+
+# Fim do programa
+print("Programa concluído.")
