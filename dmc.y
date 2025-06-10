@@ -52,8 +52,9 @@ char *escape_string_for_llvm(const char *input) {
         if (*u >= 32 && *u < 127 && *u != '\\' && *u != '"') {
             *p++ = *u;
         } else {
-            sprintf(p, "\\%02X", *u);
-            p += 4;
+            // escreve "\" + dois dígitos hex e retorna o número de bytes escritos
+            int n = sprintf(p, "\\%02X", *u);
+            p += n;
         }
         u++;
     }
@@ -1014,14 +1015,62 @@ void codegen(FILE *out, void *node) {
     }
 }
 
+void collect_string_literals(void *node) {
+    if (node == NULL) return;
+
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    if (strcmp(type, "string") == 0) {
+        char *str = (char*)n[1];
+        string_literals[string_literal_count++] = strdup(str);
+    }
+    else if (strcmp(type, "statements") == 0) {
+        collect_string_literals(n[1]);
+        collect_string_literals(n[2]);
+    }
+    else if (strcmp(type, "var_decl") == 0) {
+        collect_string_literals(n[2]);
+    }
+    else if (strcmp(type, "assign") == 0) {
+        collect_string_literals(n[2]);
+    }
+    else if (strcmp(type, "print") == 0) {
+        collect_string_literals(n[1]);
+    }
+    else if (strcmp(type, "if") == 0) {
+        collect_string_literals(n[1]);  // condition
+        collect_string_literals(n[2]);  // then block
+        if (n[4] != NULL) {  // else block
+            collect_string_literals(n[4]);
+        }
+    }
+    else if (strcmp(type, "while") == 0) {
+        collect_string_literals(n[1]);  // condition
+        collect_string_literals(n[2]);  // body
+    }
+    else if (strcmp(type, "wait") == 0) {
+        collect_string_literals(n[1]);
+    }
+    else if (strcmp(type, "save") == 0) {
+        collect_string_literals(n[1]);  // filename
+        collect_string_literals(n[2]);  // content
+    }
+    else if (strcmp(type, "add") == 0 || strcmp(type, "sub") == 0 ||
+             strcmp(type, "mul") == 0 || strcmp(type, "div") == 0 ||
+             strcmp(type, "eq") == 0 || strcmp(type, "ne") == 0 ||
+             strcmp(type, "lt") == 0 || strcmp(type, "gt") == 0 ||
+             strcmp(type, "le") == 0 || strcmp(type, "ge") == 0) {
+        collect_string_literals(n[1]);
+        collect_string_literals(n[2]);
+    }
+}
 
 void yyerror(char *s) {
     fprintf(stderr, "Line %d: Syntax error: %s\n", line_num, s);
     fprintf(stderr, "Unexpected token: %s\n", yytext);
     fprintf(stderr, "Current line: %d\n", line_num);
 }
-
-
 
 int main(int argc, char **argv) {
     if (argc > 1) {
@@ -1044,10 +1093,14 @@ int main(int argc, char **argv) {
     eval_ast(global_ast);
     printf("Program finished.\n");
 
+    // 1️⃣ Recolhe literais
+    collect_string_literals(global_ast);
+
+    // 2️⃣ Abre arquivo de IR
     FILE *out = fopen("program.ll", "w");
     header_out = out;
 
-    // 1️⃣ Declarações
+    // 3️⃣ Declarações
     fprintf(out, "declare i32 @printf(i8*, i8*)\n");
     fprintf(out, "declare i32 @my_input()\n");
     fprintf(out, "declare void @sleep_ms(i32)\n");
@@ -1056,11 +1109,11 @@ int main(int argc, char **argv) {
     fprintf(out, "declare void @concat_strings(i8*, i8*, i8*)\n");
     fprintf(out, "declare i32 @time(i32*)\n");
 
-    // 2️⃣ Constantes globais
+    // 4️⃣ Constantes globais
     fprintf(out, "@.fmt = private unnamed_addr constant [4 x i8] c\"%%d\\0A\\00\"\n");
     fprintf(out, "@.fmt_str = private unnamed_addr constant [3 x i8] c\"%%s\\00\"\n");
 
-    // 3️⃣ Emit collected string literals
+    // 5️⃣ Emit collected string literals
     for (int i = 0; i < string_literal_count; i++) {
         const char *s = string_literals[i];
         size_t len = strlen(s) + 1;
@@ -1069,16 +1122,16 @@ int main(int argc, char **argv) {
             i, len, escape_string_for_llvm(s));
     }
 
-    // 4️⃣ Define main
+    // 6️⃣ Define main
     fprintf(out, "define i32 @main() {\nentry:\n");
 
-    // 5️⃣ Gera o corpo do programa
+    // 7️⃣ Gera o corpo do programa
     codegen(out, global_ast);
 
-    // 6️⃣ Fecha main
+    // 8️⃣ Fecha main
     fprintf(out, "ret i32 0\n}\n");
 
-    // 7️⃣ Limpeza
+    // 9️⃣ Limpeza
     for (int i = 0; i < string_literal_count; i++) {
         free(string_literals[i]);
     }
