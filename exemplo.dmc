@@ -4,7 +4,7 @@
 var name = input()
 
 # Saúda o usuário
-print("Olá, " + name + "! O programa vai contar 5 segundos com timestamps.")
+print("Ola, " + name + "! O programa vai contar 5 segundos com timestamps.")
 
 # Inicializa variável de controle
 var counter = 0
