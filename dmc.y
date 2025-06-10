@@ -17,6 +17,12 @@ void *global_ast;
 // Function to print AST
 void print_ast(void *node, int level);
 
+void codegen(FILE *out, void *node);
+
+static int tmp_counter = 0;  // Global counter for LLVM SSA registers - começa em 0
+
+int codegen_expr(FILE *out, void *node);
+
 typedef struct {
     int is_string;  // 0 = int, 1 = string
     union {
@@ -32,6 +38,41 @@ typedef struct {
 
 Variable vars[100];
 int var_count = 0;
+
+static int string_literal_counter = 0;
+static char* string_literals[1000];  // Array to store string literals
+static int string_literal_count = 0;  // Count of stored string literals
+
+char *escape_string_for_llvm(const char *input) {
+    static char buffer[4096];
+    char *p = buffer;
+    const unsigned char *u = (const unsigned char*)input;
+
+    while (*u) {
+        if (*u >= 32 && *u < 127 && *u != '\\' && *u != '"') {
+            *p++ = *u;
+        } else {
+            sprintf(p, "\\%02X", *u);
+            p += 4;
+        }
+        u++;
+    }
+    *p = '\0';
+    return buffer;
+}
+
+FILE *header_out;  // usado em codegen_string_literal   
+const char* codegen_string_literal(FILE *header_out, const char *str) {
+    static char name[100];
+    sprintf(name, "str_%d", string_literal_counter++);
+    
+    // Store the string literal for later emission
+    string_literals[string_literal_count++] = strdup(str);
+    
+    return name;
+}
+
+
 
 void set_variable(const char *name, Value value) {
     for (int i = 0; i < var_count; i++) {
@@ -54,7 +95,6 @@ Value get_variable(const char *name) {
     printf("Undefined variable: %s\n", name);
     exit(1);
 }
-
 
 %}
 
@@ -123,9 +163,9 @@ statements
 statement: variable_declaration { $$ = $1; }
         | assignment { $$ = $1; }
         | print_statement { $$ = $1; }
-        | input_statement { $$ = $1; }
         | if_statement { $$ = $1; }
         | while_statement { $$ = $1; }
+        | input_statement { $$ = $1; }
         | wait_statement { $$ = $1; }
         | save_statement { $$ = $1; }
         | NEWLINE { $$ = NULL; }
@@ -688,12 +728,300 @@ void eval_ast(void *node) {
     }
 }
 
+int codegen_expr(FILE *out, void *node) {
+    if (node == NULL) return -1;
+
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    if (strcmp(type, "number") == 0) {
+        int value = *(int*)n[1];
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = add i32 %d, 0\n", tmp_id, value);
+        return tmp_id;
+    }
+    else if (strcmp(type, "identifier") == 0) {
+        char *var_name = (char*)n[1];
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = load i32, i32* %%%s\n", tmp_id, var_name);
+        return tmp_id;
+    }
+    else if (strcmp(type, "string") == 0) {
+        char *str = (char*)n[1];
+        const char *str_name = codegen_string_literal(header_out, str);
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = getelementptr inbounds [%zu x i8], [%zu x i8]* @%s, i64 0, i64 0\n", 
+                tmp_id, strlen(str)+1, strlen(str)+1, str_name);
+        return tmp_id;
+    }
+    else if (strcmp(type, "add") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = add i32 %%%d, %%%d\n", tmp_id, left, right);
+        return tmp_id;
+    }
+    else if (strcmp(type, "sub") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = sub i32 %%%d, %%%d\n", tmp_id, left, right);
+        return tmp_id;
+    }
+    else if (strcmp(type, "mul") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = mul i32 %%%d, %%%d\n", tmp_id, left, right);
+        return tmp_id;
+    }
+    else if (strcmp(type, "div") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = sdiv i32 %%%d, %%%d\n", tmp_id, left, right);
+        return tmp_id;
+    }
+    else if (strcmp(type, "input") == 0) {
+        // Proteção extra:
+        if (n[1] != NULL) {
+            // input_statement → NÃO entra aqui
+            fprintf(stderr, "ERROR: codegen_expr: input_statement detected in expression context!\n");
+            exit(1);
+        }
+
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = call i32 @my_input()\n", tmp_id);
+        return tmp_id;
+    }
+    else if (strcmp(type, "time") == 0) {
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = call i32 @time(i32* null)\n", tmp_id);
+        return tmp_id;
+    }
+    else if (strcmp(type, "lt") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id_cmp = tmp_counter++;
+        int tmp_id_bool = tmp_counter++;
+        fprintf(out, "%%%d = icmp slt i32 %%%d, %%%d\n", tmp_id_cmp, left, right);
+        fprintf(out, "%%%d = zext i1 %%%d to i32\n", tmp_id_bool, tmp_id_cmp);
+        return tmp_id_bool;
+    }
+    else if (strcmp(type, "eq") == 0) {
+        int left = codegen_expr(out, n[1]);
+        int right = codegen_expr(out, n[2]);
+        int tmp_id_cmp = tmp_counter++;
+        int tmp_id_bool = tmp_counter++;
+        fprintf(out, "%%%d = icmp eq i32 %%%d, %%%d\n", tmp_id_cmp, left, right);
+        fprintf(out, "%%%d = zext i1 %%%d to i32\n", tmp_id_bool, tmp_id_cmp);
+        return tmp_id_bool;
+    }
+    else {
+        fprintf(stderr, "ERROR: codegen_expr: unsupported node type: %s\n", type);
+        return -1;
+    }
+}
+
+
+
+char* codegen_expr_string(FILE *out, void *node) {
+    if (!node) return NULL;
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    // string literal
+    if (strcmp(type,"string")==0) {
+        char *s=(char*)n[1];
+        const char *nm = codegen_string_literal(header_out, s);
+        int r=tmp_counter++;
+        fprintf(out,
+          "%%%d = getelementptr inbounds [%zu x i8], [%zu x i8]* @%s, i64 0, i64 0\n",
+          r, strlen(s)+1, strlen(s)+1, nm);
+        char *name=malloc(16);
+        sprintf(name,"%%%d",r);
+        return name;
+    }
+    // identifier → string via sprintf
+    if (strcmp(type,"identifier")==0) {
+        char *v=(char*)n[1];
+        int load=tmp_counter++;
+        fprintf(out,"%%%d = load i32, i32* %%%s\n",load,v);
+        int buf=tmp_counter++;
+        fprintf(out,"%%%d = alloca [32 x i8], align 1\n",buf);
+        int gep=tmp_counter++;
+        fprintf(out,
+          "%%%d = getelementptr inbounds [32 x i8], [32 x i8]* %%%d, i64 0, i64 0\n",
+          gep, buf);
+        int call=tmp_counter++;
+        fprintf(out,
+          "%%%d = call i32 @sprintf(i8* %%%d, i8* getelementptr inbounds ([4 x i8],[4 x i8]* @.fmt,i64 0,i64 0), i32 %%%d)\n",
+          call, gep, load);
+        char *name=malloc(16);
+        sprintf(name,"%%%d",gep);
+        return name;
+    }
+    // number → string
+    if (strcmp(type,"number")==0) {
+        int v = *(int*)n[1];
+        int buf=tmp_counter++;
+        fprintf(out,"%%%d = alloca [32 x i8], align 1\n",buf);
+        int gep=tmp_counter++;
+        fprintf(out,
+          "%%%d = getelementptr inbounds [32 x i8], [32 x i8]* %%%d, i64 0, i64 0\n",
+          gep, buf);
+        int call=tmp_counter++;
+        fprintf(out,
+          "%%%d = call i32 @sprintf(i8* %%%d, i8* getelementptr inbounds ([4 x i8],[4 x i8]* @.fmt,i64 0,i64 0), i32 %d)\n",
+          call, gep, v);
+        char *name=malloc(16);
+        sprintf(name,"%%%d",gep);
+        return name;
+    }
+    // input → string
+    if (strcmp(type,"input")==0) {
+        int call_id = tmp_counter++;
+        fprintf(out,"%%%d = call i32 @my_input()\n",call_id);
+        int buf = tmp_counter++;
+        fprintf(out,"%%%d = alloca [32 x i8], align 1\n",buf);
+        int gep = tmp_counter++;
+        fprintf(out,
+          "%%%d = getelementptr inbounds [32 x i8], [32 x i8]* %%%d, i64 0, i64 0\n",
+          gep, buf);
+        int call = tmp_counter++;
+        fprintf(out,
+          "%%%d = call i32 @sprintf(i8* %%%d, i8* getelementptr inbounds ([4 x i8],[4 x i8]* @.fmt,i64 0,i64 0), i32 %%%d)\n",
+          call, gep, call_id);
+        char *name=malloc(16);
+        sprintf(name,"%%%d",gep);
+        return name;
+    }
+    // add strings
+    if (strcmp(type,"add")==0) {
+        char *L=codegen_expr_string(out,n[1]);
+        char *R=codegen_expr_string(out,n[2]);
+        int buf=tmp_counter++;
+        fprintf(out,"%%%d = alloca [256 x i8], align 1\n",buf);
+        int gep=tmp_counter++;
+        fprintf(out,
+          "%%%d = getelementptr inbounds [256 x i8], [256 x i8]* %%%d, i64 0, i64 0\n",
+          gep, buf);
+        fprintf(out,"call void @concat_strings(i8* %%%d, i8* %s, i8* %s)\n",gep,L,R);
+        char *name=malloc(16);
+        sprintf(name,"%%%d",gep);
+        return name;
+    }
+    fprintf(stderr,"unsupported in codegen_expr_string: %s\n",type);
+    return NULL;
+}
+
+
+void codegen(FILE *out, void *node) {
+    if (node == NULL) return;
+
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    if (strcmp(type, "statements") == 0) {
+        codegen(out, n[1]);
+        codegen(out, n[2]);
+    }
+    else if (strcmp(type, "var_decl") == 0) {
+        char *var_name = (char*)n[1];
+        fprintf(out, "%%%s = alloca i32\n", var_name);
+        int v = codegen_expr(out, n[2]);
+        fprintf(out, "store i32 %%%d, i32* %%%s\n", v, var_name);
+    }
+    else if (strcmp(type, "assign") == 0) {
+        char *var_name = (char*)n[1];
+        int v = codegen_expr(out, n[2]);
+        fprintf(out, "store i32 %%%d, i32* %%%s\n", v, var_name);
+    }
+    else if (strcmp(type, "print") == 0) {
+        if (strcmp(((char**)n[1])[0], "string") == 0 ||
+            strcmp(((char**)n[1])[0], "identifier") == 0 ||
+            strcmp(((char**)n[1])[0], "add") == 0) {
+
+            char* str_id = codegen_expr_string(out, n[1]);
+            int call = tmp_counter++;
+            fprintf(out, "%%%d = call i32 @printf(i8* getelementptr inbounds ([3 x i8], [3 x i8]* @.fmt_str, i32 0, i32 0), i8* %s)\n", 
+                    call, str_id);
+        }
+        else {
+            int tmp_id = codegen_expr(out, n[1]);
+            int call = tmp_counter++;
+            fprintf(out, "%%%d = call i32 @printf(i8* getelementptr inbounds ([4 x i8], [4 x i8]* @.fmt, i32 0, i32 0), i32 %%%d)\n", 
+                    call, tmp_id);
+        }
+    }
+    else if (strcmp(type, "wait") == 0) {
+        int tmp_id = codegen_expr(out, n[1]);
+        fprintf(out, "call void @sleep_ms(i32 %%%d)\n", tmp_id);
+    }
+    else if (strcmp(type, "input") == 0 && n[1] != NULL) {
+        // é um input_statement
+        char *var_name = (char*)n[1];
+        int tmp_id = tmp_counter++;
+        fprintf(out, "%%%d = call i32 @my_input()\n", tmp_id);
+        fprintf(out, "store i32 %%%d, i32* %%%s\n", tmp_id, var_name);
+    }
+    else if (strcmp(type, "save") == 0) {
+        // Gerar os dois argumentos como string:
+        char* file_str_id = codegen_expr_string(out, n[1]);
+        char* content_str_id = codegen_expr_string(out, n[2]);
+
+        // Gerar a chamada:
+        fprintf(out, "call void @save_file(i8* %s, i8* %s)\n", file_str_id, content_str_id);
+    }
+    else if (strcmp(type, "if") == 0) {
+        static int label_count = 0;
+        int curr = label_count++;
+
+        int cond_id = codegen_expr(out, n[1]);
+        int cmp_id = tmp_counter++;
+        fprintf(out, "%%%d = icmp ne i32 %%%d, 0\n", cmp_id, cond_id);
+        fprintf(out, "br i1 %%%d, label %%if_then_%d, label %%if_else_%d\n", cmp_id, curr, curr);
+
+        fprintf(out, "if_then_%d:\n", curr);
+        codegen(out, n[2]);
+        fprintf(out, "br label %%if_end_%d\n", curr);
+
+        fprintf(out, "if_else_%d:\n", curr);
+        if (n[4] != NULL) {
+            codegen(out, n[4]);
+        }
+        fprintf(out, "br label %%if_end_%d\n", curr);
+
+        fprintf(out, "if_end_%d:\n", curr);
+    }
+    else if (strcmp(type, "while") == 0) {
+        static int label_count = 0;
+        int curr = label_count++;
+
+        fprintf(out, "br label %%while_cond_%d\n", curr);
+        fprintf(out, "while_cond_%d:\n", curr);
+
+        int cond_id = codegen_expr(out, n[1]);
+        int cmp_id = tmp_counter++;
+        fprintf(out, "%%%d = icmp ne i32 %%%d, 0\n", cmp_id, cond_id);
+        fprintf(out, "br i1 %%%d, label %%while_body_%d, label %%while_end_%d\n", cmp_id, curr, curr);
+
+        fprintf(out, "while_body_%d:\n", curr);
+        codegen(out, n[2]);
+        fprintf(out, "br label %%while_cond_%d\n", curr);
+
+        fprintf(out, "while_end_%d:\n", curr);
+    }
+}
+
 
 void yyerror(char *s) {
     fprintf(stderr, "Line %d: Syntax error: %s\n", line_num, s);
     fprintf(stderr, "Unexpected token: %s\n", yytext);
     fprintf(stderr, "Current line: %d\n", line_num);
 }
+
+
 
 int main(int argc, char **argv) {
     if (argc > 1) {
@@ -716,7 +1044,48 @@ int main(int argc, char **argv) {
     eval_ast(global_ast);
     printf("Program finished.\n");
 
+    FILE *out = fopen("program.ll", "w");
+    header_out = out;
+
+    // 1️⃣ Declarações
+    fprintf(out, "declare i32 @printf(i8*, i8*)\n");
+    fprintf(out, "declare i32 @my_input()\n");
+    fprintf(out, "declare void @sleep_ms(i32)\n");
+    fprintf(out, "declare void @save_file(i8*, i8*)\n");
+    fprintf(out, "declare i32 @sprintf(i8*, i8*, i32)\n");
+    fprintf(out, "declare void @concat_strings(i8*, i8*, i8*)\n");
+    fprintf(out, "declare i32 @time(i32*)\n");
+
+    // 2️⃣ Constantes globais
+    fprintf(out, "@.fmt = private unnamed_addr constant [4 x i8] c\"%%d\\0A\\00\"\n");
+    fprintf(out, "@.fmt_str = private unnamed_addr constant [3 x i8] c\"%%s\\00\"\n");
+
+    // 3️⃣ Emit collected string literals
+    for (int i = 0; i < string_literal_count; i++) {
+        const char *s = string_literals[i];
+        size_t len = strlen(s) + 1;
+        fprintf(out,
+            "@str_%d = private unnamed_addr constant [%zu x i8] c\"%s\\00\"\n",
+            i, len, escape_string_for_llvm(s));
+    }
+
+    // 4️⃣ Define main
+    fprintf(out, "define i32 @main() {\nentry:\n");
+
+    // 5️⃣ Gera o corpo do programa
+    codegen(out, global_ast);
+
+    // 6️⃣ Fecha main
+    fprintf(out, "ret i32 0\n}\n");
+
+    // 7️⃣ Limpeza
+    for (int i = 0; i < string_literal_count; i++) {
+        free(string_literals[i]);
+    }
+
+    fclose(out);
 
     return 0;
 }
+
 
