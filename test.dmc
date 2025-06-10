@@ -1,15 +1,16 @@
-var x = 0
-var name = input
+// exemplo.dmc
+// Um teste simples cobrindo print, variável, loop, wait_ms e save_file
 
-print("Welcome, " + name)
+print("Digite seu nome:");
+var nome = get_input();         // lê uma linha do stdin
+print("Olá, " + nome + "!\n");
 
-while x < 5 {
-    print(x)
-    wait(1000)
-    x = x + 1
+var i = 0;
+while (i < 3) {
+    print("Contador: " + i + "\n");
+    wait_ms(500);               // pausa 500 ms
+    i = i + 1;
 }
 
-if x == 5 {
-    save("log.txt", "Loop finished.")
-    print("Program completed.")
-} 
+// salva uma string em arquivo
+save_file("saida.txt", "Última contagem: " + i);
