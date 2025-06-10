@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>   // for usleep
+#include <time.h>     // for time
 
 void yyerror(char *);
 int yylex(void);
@@ -10,10 +12,50 @@ extern int line_num;
 extern char* yytext;
 extern FILE *yyin;
 
-
+void *global_ast;
 
 // Function to print AST
 void print_ast(void *node, int level);
+
+typedef struct {
+    int is_string;  // 0 = int, 1 = string
+    union {
+        int int_value;
+        char *str_value;
+    };
+} Value;
+
+typedef struct {
+    char name[100];
+    Value value;
+} Variable;
+
+Variable vars[100];
+int var_count = 0;
+
+void set_variable(const char *name, Value value) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) {
+            vars[i].value = value;
+            return;
+        }
+    }
+    strcpy(vars[var_count].name, name);
+    vars[var_count].value = value;
+    var_count++;
+}
+
+Value get_variable(const char *name) {
+    for (int i = 0; i < var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) {
+            return vars[i].value;
+        }
+    }
+    printf("Undefined variable: %s\n", name);
+    exit(1);
+}
+
+
 %}
 
 %union {
@@ -39,11 +81,13 @@ void print_ast(void *node, int level);
 %type <node> block expression comparison addition term factor
 %type <node> else_clause_opt
 
+
 %%
 
 program: statements { 
     printf("\nAbstract Syntax Tree:\n");
     print_ast($1, 0);
+    global_ast = $1;
     $$ = $1;
 }
     ;
@@ -426,6 +470,224 @@ void print_ast(void *node, int level) {
     }
 }
 
+Value eval_expr(void *node) {
+    Value result;
+    result.is_string = 0;
+    result.int_value = 0;
+
+    if (node == NULL) return result;
+
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    if (strcmp(type, "number") == 0) {
+        result.is_string = 0;
+        result.int_value = *(int*)n[1];
+    }
+    else if (strcmp(type, "string") == 0) {
+        result.is_string = 1;
+        result.str_value = strdup((char*)n[1]);
+    }
+    else if (strcmp(type, "identifier") == 0) {
+        result = get_variable((char*)n[1]);
+    }
+    else if (strcmp(type, "add") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+
+        if (left.is_string || right.is_string) {
+            // Convert ints to strings if needed
+            char left_str[1000], right_str[1000];
+            if (left.is_string) {
+                strcpy(left_str, left.str_value);
+            } else {
+                sprintf(left_str, "%d", left.int_value);
+            }
+            if (right.is_string) {
+                strcpy(right_str, right.str_value);
+            } else {
+                sprintf(right_str, "%d", right.int_value);
+            }
+
+            // Concatenate strings
+            char *result_str = malloc(strlen(left_str) + strlen(right_str) + 1);
+            strcpy(result_str, left_str);
+            strcat(result_str, right_str);
+
+            result.is_string = 1;
+            result.str_value = result_str;
+        } else {
+            // Pure integer addition
+            result.is_string = 0;
+            result.int_value = left.int_value + right.int_value;
+        }
+    }
+    else if (strcmp(type, "sub") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value - right.int_value;
+    }
+    else if (strcmp(type, "mul") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value * right.int_value;
+    }
+    else if (strcmp(type, "div") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value / right.int_value;
+    }
+    else if (strcmp(type, "lt") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value < right.int_value;
+    }
+    else if (strcmp(type, "gt") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value > right.int_value;
+    }
+    else if (strcmp(type, "le") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value <= right.int_value;
+    }
+    else if (strcmp(type, "ge") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        result.int_value = left.int_value >= right.int_value;
+    }
+    else if (strcmp(type, "eq") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        if (left.is_string || right.is_string) {
+            // Compare strings
+            char *left_str = left.is_string ? left.str_value : "";
+            char *right_str = right.is_string ? right.str_value : "";
+            result.int_value = strcmp(left_str, right_str) == 0;
+        } else {
+            result.int_value = left.int_value == right.int_value;
+        }
+    }
+    else if (strcmp(type, "ne") == 0) {
+        Value left = eval_expr(n[1]);
+        Value right = eval_expr(n[2]);
+        result.is_string = 0;
+        if (left.is_string || right.is_string) {
+            char *left_str = left.is_string ? left.str_value : "";
+            char *right_str = right.is_string ? right.str_value : "";
+            result.int_value = strcmp(left_str, right_str) != 0;
+        } else {
+            result.int_value = left.int_value != right.int_value;
+        }
+    }
+    else if (strcmp(type, "input") == 0) {
+        char buffer[1000];
+        printf("> ");
+        fgets(buffer, sizeof(buffer), stdin);
+        buffer[strcspn(buffer, "\n")] = 0;  // remove newline
+
+        result.is_string = 1;
+        result.str_value = strdup(buffer);
+    }
+    else if (strcmp(type, "time") == 0) {
+        result.is_string = 0;
+        result.int_value = (int)time(NULL);
+    }
+
+    return result;
+}
+
+
+void eval_ast(void *node) {
+    if (node == NULL) return;
+
+    void **n = (void**)node;
+    char *type = (char*)n[0];
+
+    if (strcmp(type, "statements") == 0) {
+        eval_ast(n[1]);
+        eval_ast(n[2]);
+    }
+    else if (strcmp(type, "var_decl") == 0) {
+        char *var_name = (char*)n[1];
+        Value value = eval_expr(n[2]);
+        set_variable(var_name, value);
+    }
+    else if (strcmp(type, "assign") == 0) {
+        char *var_name = (char*)n[1];
+        Value value = eval_expr(n[2]);
+        set_variable(var_name, value);
+    }
+    else if (strcmp(type, "print") == 0) {
+        Value value = eval_expr(n[1]);
+        if (value.is_string) {
+            printf("%s\n", value.str_value);
+        } else {
+            printf("%d\n", value.int_value);
+        }
+    }
+
+    else if (strcmp(type, "wait") == 0) {
+        Value value = eval_expr(n[1]); 
+        int ms = value.int_value;
+        usleep(ms * 1000);
+    }
+    else if (strcmp(type, "save") == 0) {
+        Value file_name_val = eval_expr(n[1]);
+        Value content_val = eval_expr(n[2]);
+
+        if (!file_name_val.is_string) {
+            printf("Error: SAVE file name must be a string.\n");
+            return;
+        }
+
+        const char *filename = file_name_val.str_value;
+        FILE *f = fopen(filename, "w");
+        if (!f) {
+            printf("Error: could not open file %s for writing.\n", filename);
+            return;
+        }
+
+        if (content_val.is_string) {
+            fprintf(f, "%s", content_val.str_value);
+        } else {
+            fprintf(f, "%d", content_val.int_value);
+        }
+
+        fclose(f);
+    }
+
+    else if (strcmp(type, "while") == 0) {
+        Value cond = eval_expr(n[1]);
+        while (cond.int_value) {
+            eval_ast(n[2]);
+            cond = eval_expr(n[1]);  // re-evaluate condition
+        }
+    }
+    else if (strcmp(type, "if") == 0) {
+        Value cond = eval_expr(n[1]);
+        if (cond.int_value) {
+            eval_ast(n[2]);
+        } else if (n[4] != NULL) {
+            void **else_node = (void**)n[4];
+            if (strcmp((char*)else_node[0], "else") == 0) {
+                eval_ast(else_node[1]);
+            } else {
+                eval_ast(n[4]);  // else if
+            }
+        }
+    }
+}
+
 
 void yyerror(char *s) {
     fprintf(stderr, "Line %d: Syntax error: %s\n", line_num, s);
@@ -449,6 +711,11 @@ int main(int argc, char **argv) {
     printf("Starting parse...\n");
     yyparse();
     printf("Parse completed.\n");
+
+    printf("Executing program...\n");
+    eval_ast(global_ast);
+    printf("Program finished.\n");
+
 
     return 0;
 }
